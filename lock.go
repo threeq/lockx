@@ -5,16 +5,24 @@ import (
 	"time"
 )
 
-// Locker 锁实现接口
+// Locker 锁接口
 type Locker interface {
 	Lock() error
 	Unlock() error
 }
 
+// RWLocker 读写锁接口
+type RWLocker interface {
+	Locker
+	RLock() error
+	RUnlock() error
+	RLocker() Locker
+}
+
 // LockerFactory 锁创建工厂实现接口
 type LockerFactory interface {
 	Mutex(context.Context, ...Option) (Locker, error)
-	RWMutex(context.Context, ...Option) (Locker, error)
+	RWMutex(context.Context, ...Option) (RWLocker, error)
 }
 
 // --------------------------------------------------------------------

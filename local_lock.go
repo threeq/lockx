@@ -44,16 +44,18 @@ func (llf *LocalLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 }
 
 // RWMutex 获取读写锁
-func (llf *LocalLockerFactory) RWMutex(ctx context.Context, options ...Option) (Locker, error) {
+func (llf *LocalLockerFactory) RWMutex(ctx context.Context, options ...Option) (RWLocker, error) {
 	llf.mutex.Lock()
 	defer llf.mutex.Unlock()
 
 	meta := llf.lockerMeta(ctx, &sync.RWMutex{}, options...)
 
-	return &localLocker{
-		key:     meta.key,
-		mtx:     llf.mutexes[meta.key].mux,
-		factory: llf,
+	return &localRWLocker{
+		localLocker{
+			key:     meta.key,
+			mtx:     llf.mutexes[meta.key].mux,
+			factory: llf,
+		},
 	}, nil
 }
 
@@ -101,7 +103,30 @@ func (ll *localLocker) Lock() error {
 
 //Unlock 解锁
 func (ll *localLocker) Unlock() error {
-	ll.factory.Del(ll.key)
+	if ll.factory != nil {
+		ll.factory.Del(ll.key)
+	}
 	ll.mtx.Unlock()
 	return nil
+}
+
+// localLocker 本地锁包装
+type localRWLocker struct {
+	localLocker
+}
+
+func (l *localRWLocker) RLock() error {
+	l.mtx.(*sync.RWMutex).RLock()
+	return nil
+}
+
+func (l *localRWLocker) RUnlock() error {
+	l.mtx.(*sync.RWMutex).RUnlock()
+	return nil
+}
+
+func (l *localRWLocker) RLocker() Locker {
+	return &localLocker{
+		mtx: l.mtx.(*sync.RWMutex).RLocker(),
+	}
 }

@@ -54,6 +54,10 @@ func (rlf *RedisLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 
 }
 
+func (rlf *RedisLockerFactory) RWMutex(ctx context.Context, options ...Option) (RWLocker, error) {
+	return nil, nil
+}
+
 func (rlf *RedisLockerFactory) randomToken() (string, error) {
 	rlf.mux.Lock()
 	defer rlf.mux.Unlock()
