@@ -14,6 +14,7 @@ type Locker interface {
 // LockerFactory 锁创建工厂实现接口
 type LockerFactory interface {
 	Mutex(context.Context, ...Option) (Locker, error)
+	RWMutex(context.Context, ...Option) (Locker, error)
 }
 
 // --------------------------------------------------------------------

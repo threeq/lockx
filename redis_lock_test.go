@@ -7,12 +7,14 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/threeq/lockx"
+	"log"
 	"testing"
 	"time"
 )
 
 var mr *miniredis.Miniredis
 var lf lockx.LockerFactory
+var client *redis.Client
 
 func init() {
 	var err error
@@ -24,7 +26,7 @@ func init() {
 	//addr := "10.66.173.3:6379"
 	addr := mr.Addr()
 	fmt.Println("memory redis addr: ", addr)
-	client := redis.NewClient(&redis.Options{
+	client = redis.NewClient(&redis.Options{
 		Addr: addr,
 		//Password: "!13#c%b^*a",
 	})
@@ -42,6 +44,16 @@ func TestRedisLocker_All(t *testing.T) {
 	err = mtx.Lock()
 	assert.Nil(t, err)
 
+	s, err := client.Get(context.Background(), "redis-lock").Result()
+	assert.Nil(t, err)
+	assert.NotEmpty(t, s)
+	log.Println(s)
+
 	err = mtx.Unlock()
 	assert.Nil(t, err)
+
+	s, err = client.Get(context.Background(), "redis-lock").Result()
+	assert.NotNil(t, err)
+	assert.ErrorIs(t, err, redis.Nil)
+	assert.Empty(t, s)
 }

@@ -6,7 +6,7 @@ import (
 )
 
 type lockerCount struct {
-	mux   *sync.Mutex
+	mux   sync.Locker
 	count int
 }
 
@@ -29,11 +29,35 @@ func NewLocalLockerFactory() LockerFactory {
 	return localLockerFactory
 }
 
-// Mutex 生产一个新锁
-func (llf *LocalLockerFactory) Mutex(_ context.Context, options ...Option) (Locker, error) {
+// Mutex 获取普通锁
+func (llf *LocalLockerFactory) Mutex(ctx context.Context, options ...Option) (Locker, error) {
 	llf.mutex.Lock()
 	defer llf.mutex.Unlock()
 
+	meta := llf.lockerMeta(ctx, &sync.Mutex{}, options...)
+
+	return &localLocker{
+		key:     meta.key,
+		mtx:     llf.mutexes[meta.key].mux,
+		factory: llf,
+	}, nil
+}
+
+// RWMutex 获取读写锁
+func (llf *LocalLockerFactory) RWMutex(ctx context.Context, options ...Option) (Locker, error) {
+	llf.mutex.Lock()
+	defer llf.mutex.Unlock()
+
+	meta := llf.lockerMeta(ctx, &sync.RWMutex{}, options...)
+
+	return &localLocker{
+		key:     meta.key,
+		mtx:     llf.mutexes[meta.key].mux,
+		factory: llf,
+	}, nil
+}
+
+func (llf *LocalLockerFactory) lockerMeta(ctx context.Context, mtx sync.Locker, options ...Option) *LockerMeta {
 	meta := new(LockerMeta)
 	meta.retryStrategy = NoRetry()
 	for _, opt := range options {
@@ -41,16 +65,12 @@ func (llf *LocalLockerFactory) Mutex(_ context.Context, options ...Option) (Lock
 	}
 
 	if _, ok := llf.mutexes[meta.key]; !ok {
-		llf.mutexes[meta.key] = &lockerCount{&sync.Mutex{}, 1}
+		llf.mutexes[meta.key] = &lockerCount{mtx, 1}
 	} else {
 		llf.mutexes[meta.key].count++
 	}
 
-	return &LocalLocker{
-		key:     meta.key,
-		mtx:     llf.mutexes[meta.key].mux,
-		factory: llf,
-	}, nil
+	return meta
 }
 
 //Del 删除一个锁
@@ -66,21 +86,21 @@ func (llf *LocalLockerFactory) Del(key string) {
 	}
 }
 
-// LocalLocker 本地锁
-type LocalLocker struct {
+// localLocker 本地锁包装
+type localLocker struct {
 	factory *LocalLockerFactory
 	key     string
-	mtx     *sync.Mutex
+	mtx     sync.Locker
 }
 
 //Lock 加锁
-func (ll *LocalLocker) Lock() error {
+func (ll *localLocker) Lock() error {
 	ll.mtx.Lock()
 	return nil
 }
 
 //Unlock 解锁
-func (ll *LocalLocker) Unlock() error {
+func (ll *localLocker) Unlock() error {
 	ll.factory.Del(ll.key)
 	ll.mtx.Unlock()
 	return nil
