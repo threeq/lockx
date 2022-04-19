@@ -18,15 +18,16 @@ type RedisClient interface {
 }
 
 //NewRedisLockerFactory 新建 redis 分布式锁工厂
-func NewRedisLockerFactory(client RedisClient) LockerFactory {
-	return &RedisLockerFactory{client: client}
+func NewRedisLockerFactory(client RedisClient) *RedisLockerFactory {
+	return &RedisLockerFactory{client: client, mux: sync.Mutex{}, tmpCache: make(map[string]*redisL2Locker, 1000)}
 }
 
 //RedisLockerFactory 分布式工厂锁实现
 type RedisLockerFactory struct {
-	client RedisClient
-	tmp    []byte
-	mux    sync.Mutex
+	client   RedisClient
+	tmp      []byte
+	mux      sync.Mutex
+	tmpCache map[string]*redisL2Locker
 }
 
 // Mutex tries to obtain a new lock using a key with the given TTL.
@@ -39,13 +40,17 @@ func (rlf *RedisLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 	for _, opt := range options {
 		opt(meta)
 	}
+
+	rlf.mux.Lock()
+	defer rlf.mux.Unlock()
+
 	// Create a random token
 	token, err := rlf.randomToken()
 	if err != nil {
 		return nil, err
 	}
 
-	return &RedisLocker{
+	return &redisLocker{
 		ctx:    ctx,
 		client: rlf.client,
 		meta:   meta,
@@ -54,14 +59,57 @@ func (rlf *RedisLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 
 }
 
+// MutexL2 获取针对相同的 key 优化的二级锁
+func (rlf *RedisLockerFactory) MutexL2(ctx context.Context, options ...Option) (*redisL2Locker, error) {
+	// meta
+	meta := &LockerMeta{
+		retryStrategy: NoRetry(),
+	}
+	for _, opt := range options {
+		opt(meta)
+	}
+
+	rlf.mux.Lock()
+	defer rlf.mux.Unlock()
+
+	if l, ok := rlf.tmpCache[meta.key]; ok {
+		return l, nil
+	}
+
+	// Create a random token
+	token, err := rlf.randomToken()
+	if err != nil {
+		return nil, err
+	}
+
+	l := &redisL2Locker{
+		mux: sync.Mutex{},
+		redisLocker: redisLocker{
+			ctx:    ctx,
+			client: rlf.client,
+			meta:   meta,
+			value:  token,
+		},
+	}
+
+	// 根据数量定期释放
+	if len(rlf.tmpCache) >= 1*10000 {
+		rlf.tmpCache = make(map[string]*redisL2Locker, 1000)
+	}
+
+	rlf.tmpCache[meta.key] = l
+
+	return l, nil
+
+}
+
+// RWMutex tries to obtain a new lock using a key with the given TTL.
+// May return ErrNotObtained if not successful.
 func (rlf *RedisLockerFactory) RWMutex(ctx context.Context, options ...Option) (RWLocker, error) {
 	return nil, nil
 }
 
 func (rlf *RedisLockerFactory) randomToken() (string, error) {
-	rlf.mux.Lock()
-	defer rlf.mux.Unlock()
-
 	if len(rlf.tmp) == 0 {
 		rlf.tmp = make([]byte, 16)
 	}
@@ -86,10 +134,13 @@ var (
 
 	// ErrLockNotHeld is returned when trying to release an inactive lock.
 	ErrLockNotHeld = errors.New("redislock: lock not held")
+
+	// ErrNotSupport is returned when trying to release an inactive lock.
+	ErrNotSupport = errors.New("redislock: redisL2Locker.Unlock() Method 不需调用。释放锁请使用 redisL2Locker.Lock() 返回的 UnlockHandler。")
 )
 
-//RedisLocker 分布式锁实现
-type RedisLocker struct {
+//redisLocker 分布式锁实现
+type redisLocker struct {
 	client RedisClient
 	value  string
 	meta   *LockerMeta
@@ -97,7 +148,7 @@ type RedisLocker struct {
 }
 
 //Lock 加锁
-func (rl *RedisLocker) Lock() error {
+func (rl *redisLocker) Lock() error {
 	value := rl.value
 	retry := rl.meta.retryStrategy
 
@@ -109,6 +160,7 @@ func (rl *RedisLocker) Lock() error {
 			return err
 		} else if ok {
 			// 加锁成功
+			rl.startMonitor()
 			return nil
 		}
 
@@ -134,12 +186,13 @@ func (rl *RedisLocker) Lock() error {
 	return ErrNotObtained
 }
 
-func (rl *RedisLocker) obtain(key, value string, ttl time.Duration) (bool, error) {
+func (rl *redisLocker) obtain(key, value string, ttl time.Duration) (bool, error) {
 	return rl.client.SetNX(rl.ctx, key, value, ttl).Result()
 }
 
 //Unlock 解锁
-func (rl *RedisLocker) Unlock() error {
+func (rl *redisLocker) Unlock() error {
+	rl.stopMonitor()
 	res, err := rl.client.Eval(rl.ctx, luaRelease, []string{rl.meta.key}, rl.value).Result()
 	if err != nil {
 		return err
@@ -149,4 +202,39 @@ func (rl *RedisLocker) Unlock() error {
 		return ErrLockNotHeld
 	}
 	return nil
+}
+
+func (rl *redisLocker) startMonitor() {
+	//panic("需要实现")
+}
+
+func (rl *redisLocker) stopMonitor() {
+	//panic("需要实现")
+}
+
+//redisL2Locker 分布式锁实现，两级锁
+type redisL2Locker struct {
+	redisLocker
+	mux sync.Mutex
+}
+type UnlockHandler func() error
+
+//Lock 加锁
+func (rl2 *redisL2Locker) Lock() (UnlockHandler, error) {
+	rl2.mux.Lock()
+	err := rl2.redisLocker.Lock()
+	if err != nil {
+		rl2.mux.Unlock()
+		return nil, err
+	}
+	return func() error {
+		err := rl2.redisLocker.Unlock()
+		rl2.mux.Unlock()
+		return err
+	}, nil
+}
+
+//Unlock 屏蔽直接释放锁
+func (rl2 *redisL2Locker) Unlock() error {
+	return ErrNotSupport
 }

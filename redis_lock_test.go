@@ -14,6 +14,7 @@ import (
 
 var mr *miniredis.Miniredis
 var lf lockx.LockerFactory
+var redisLF *lockx.RedisLockerFactory
 var client *redis.Client
 
 func init() {
@@ -30,8 +31,8 @@ func init() {
 		Addr: addr,
 		//Password: "!13#c%b^*a",
 	})
-	lf = lockx.NewRedisLockerFactory(client)
-
+	redisLF = lockx.NewRedisLockerFactory(client)
+	lf = redisLF
 }
 
 func TestRedisLocker_All(t *testing.T) {
@@ -56,4 +57,14 @@ func TestRedisLocker_All(t *testing.T) {
 	assert.NotNil(t, err)
 	assert.ErrorIs(t, err, redis.Nil)
 	assert.Empty(t, s)
+}
+
+func TestOptimizeRedisLocker_Lock(t *testing.T) {
+	defer mr.Close()
+
+	mux, err := redisLF.MutexL2(context.Background(), lockx.Key("redis-lock"), lockx.TTL(3*time.Second))
+
+	assert.Nil(t, err)
+
+	_, _ = mux.Lock()
 }
