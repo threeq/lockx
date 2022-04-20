@@ -221,12 +221,15 @@ type redisL2Locker struct {
 //Lock 加锁
 func (rl2 *redisL2Locker) Lock() error {
 	rl2.mux.Lock()
-	return rl2.redisLocker.Lock()
+	err := rl2.redisLocker.Lock()
+	if err != nil {
+		rl2.mux.Unlock()
+	}
+	return err
 }
 
 //Unlock 释放锁
 func (rl2 *redisL2Locker) Unlock() error {
-	err := rl2.redisLocker.Unlock()
-	rl2.mux.Lock()
-	return err
+	defer rl2.mux.Unlock()
+	return rl2.redisLocker.Unlock()
 }
