@@ -217,24 +217,16 @@ type redisL2Locker struct {
 	redisLocker
 	mux sync.Mutex
 }
-type UnlockHandler func() error
 
 //Lock 加锁
-func (rl2 *redisL2Locker) Lock() (UnlockHandler, error) {
+func (rl2 *redisL2Locker) Lock() error {
 	rl2.mux.Lock()
-	err := rl2.redisLocker.Lock()
-	if err != nil {
-		rl2.mux.Unlock()
-		return nil, err
-	}
-	return func() error {
-		err := rl2.redisLocker.Unlock()
-		rl2.mux.Unlock()
-		return err
-	}, nil
+	return rl2.redisLocker.Lock()
 }
 
-//Unlock 屏蔽直接释放锁
+//Unlock 释放锁
 func (rl2 *redisL2Locker) Unlock() error {
-	return ErrNotSupport
+	err := rl2.redisLocker.Unlock()
+	rl2.mux.Lock()
+	return err
 }
