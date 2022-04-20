@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"github.com/go-redis/redis/v8"
+	"github.com/threeq/lockx/timingwheel"
 	"io"
+	"log"
 	"sync"
 	"time"
 )
@@ -19,7 +21,12 @@ type RedisClient interface {
 
 //NewRedisLockerFactory 新建 redis 分布式锁工厂
 func NewRedisLockerFactory(client RedisClient) *RedisLockerFactory {
-	return &RedisLockerFactory{client: client, mux: sync.Mutex{}, tmpCache: make(map[string]*redisL2Locker, 1000)}
+	return &RedisLockerFactory{
+		client:   client,
+		mux:      sync.Mutex{},
+		tmpCache: make(map[string]*redisL2Locker, 1000),
+		tw:       timingwheel.NewTimingWheel(1*time.Second, 3600),
+	}
 }
 
 //RedisLockerFactory 分布式工厂锁实现
@@ -28,6 +35,7 @@ type RedisLockerFactory struct {
 	tmp      []byte
 	mux      sync.Mutex
 	tmpCache map[string]*redisL2Locker
+	tw       *timingwheel.TimingWheel
 }
 
 // Mutex tries to obtain a new lock using a key with the given TTL.
@@ -55,6 +63,7 @@ func (rlf *RedisLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 		client: rlf.client,
 		meta:   meta,
 		value:  token,
+		tw:     rlf.tw,
 	}, nil
 
 }
@@ -89,6 +98,7 @@ func (rlf *RedisLockerFactory) MutexL2(ctx context.Context, options ...Option) (
 			client: rlf.client,
 			meta:   meta,
 			value:  token,
+			tw:     rlf.tw,
 		},
 	}
 
@@ -123,7 +133,7 @@ func (rlf *RedisLockerFactory) randomToken() (string, error) {
 // --------------------------------------------------
 
 const (
-	luaRefresh = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end`
+	luaRefresh = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 2 end`
 	luaRelease = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`
 	luaPTTL    = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pttl", KEYS[1]) else return -3 end`
 )
@@ -141,10 +151,12 @@ var (
 
 //redisLocker 分布式锁实现
 type redisLocker struct {
-	client RedisClient
-	value  string
-	meta   *LockerMeta
-	ctx    context.Context
+	client  RedisClient
+	value   string
+	meta    *LockerMeta
+	ctx     context.Context
+	tw      *timingwheel.TimingWheel
+	locking chan struct{}
 }
 
 //Lock 加锁
@@ -152,7 +164,7 @@ func (rl *redisLocker) Lock() error {
 	value := rl.value
 	retry := rl.meta.retryStrategy
 
-	var timer *time.Timer
+	var timer <-chan struct{}
 	for deadline := time.Now().Add(rl.meta.ttl); time.Now().Before(deadline); {
 
 		ok, err := rl.obtain(rl.meta.key, value, rl.meta.ttl)
@@ -169,17 +181,12 @@ func (rl *redisLocker) Lock() error {
 			break
 		}
 
-		if timer == nil {
-			timer = time.NewTimer(backoff)
-			defer timer.Stop()
-		} else {
-			timer.Reset(backoff)
-		}
+		timer = rl.tw.After(backoff)
 
 		select {
 		case <-rl.ctx.Done():
 			return rl.ctx.Err()
-		case <-timer.C:
+		case <-timer:
 		}
 	}
 
@@ -204,12 +211,48 @@ func (rl *redisLocker) Unlock() error {
 	return nil
 }
 
+func formatMs(dur time.Duration) int64 {
+	if dur > 0 && dur < time.Millisecond {
+		return 1
+	}
+	return int64(dur / time.Millisecond)
+}
+
 func (rl *redisLocker) startMonitor() {
-	//panic("需要实现")
+	rl.locking = make(chan struct{})
+	go func() {
+		for {
+			next := rl.tw.After(rl.meta.ttl / 2)
+			select {
+			case <-rl.locking:
+				return
+			case <-next:
+				println("luaRefresh")
+				res, err := rl.client.Eval(rl.ctx, luaRefresh, []string{rl.meta.key}, rl.value, formatMs(rl.meta.ttl)).Result()
+				if err != nil {
+					log.Printf("[Warning] redis lock lua-refresh key <%s> execute error: %s.\n", rl.meta.key, err.Error())
+				} else {
+					if ret, ok := res.(int64); ok {
+						switch ret {
+						case 0:
+							log.Printf("[Warning] redis lock lua-refresh key <%s> not exists or not pexpire ttl.\n", rl.meta.key)
+						case 2:
+							log.Printf("[Warning] redis lock lua-refresh key <%s> invalid and has been obtained by someone else.\n", rl.meta.key)
+							return
+						}
+					}
+				}
+			}
+		}
+	}()
 }
 
 func (rl *redisLocker) stopMonitor() {
-	//panic("需要实现")
+	println("stopMonitor ================")
+	if rl.locking != nil {
+		close(rl.locking)
+		rl.locking = nil
+	}
 }
 
 //redisL2Locker 分布式锁实现，两级锁
