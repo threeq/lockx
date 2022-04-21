@@ -43,6 +43,11 @@ func (llf *LocalLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 	}, nil
 }
 
+// MutexL2 本地锁没有二级锁概念
+func (llf *LocalLockerFactory) MutexL2(ctx context.Context, options ...Option) (Locker, error) {
+	return llf.Mutex(ctx, options...)
+}
+
 // RWMutex 获取读写锁
 func (llf *LocalLockerFactory) RWMutex(ctx context.Context, options ...Option) (RWLocker, error) {
 	llf.mutex.Lock()

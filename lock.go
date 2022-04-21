@@ -22,6 +22,7 @@ type RWLocker interface {
 // LockerFactory 锁创建工厂实现接口
 type LockerFactory interface {
 	Mutex(context.Context, ...Option) (Locker, error)
+	MutexL2(ctx context.Context, options ...Option) (Locker, error)
 	RWMutex(context.Context, ...Option) (RWLocker, error)
 }
 
@@ -130,4 +131,24 @@ func (r *exponentialBackoff) NextBackoff() time.Duration {
 	} else {
 		return d
 	}
+}
+
+var _factory LockerFactory
+
+func init() {
+	_factory = NewLocalLockerFactory()
+}
+
+func Init(factory LockerFactory) {
+	_factory = factory
+}
+
+func Mutex(ctx context.Context, opts ...Option) (Locker, error) {
+	return _factory.Mutex(ctx, opts...)
+}
+func MutexL2(ctx context.Context, opts ...Option) (Locker, error) {
+	return _factory.MutexL2(ctx, opts...)
+}
+func RWMutex(ctx context.Context, opts ...Option) (RWLocker, error) {
+	return _factory.RWMutex(ctx, opts...)
 }

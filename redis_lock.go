@@ -69,7 +69,7 @@ func (rlf *RedisLockerFactory) Mutex(ctx context.Context, options ...Option) (Lo
 }
 
 // MutexL2 获取针对相同的 key 优化的二级锁
-func (rlf *RedisLockerFactory) MutexL2(ctx context.Context, options ...Option) (*redisL2Locker, error) {
+func (rlf *RedisLockerFactory) MutexL2(ctx context.Context, options ...Option) (Locker, error) {
 	// meta
 	meta := &LockerMeta{
 		retryStrategy: NoRetry(),
